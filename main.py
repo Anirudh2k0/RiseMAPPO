@@ -1,143 +1,168 @@
 import torch
-import torch.nn as nn
 import torch.optim as optim
+import numpy as np
+from collections import deque
+from torch.distributions import Categorical
 import pandas as pd
 from latest import NewEnv
 from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
+from agents import MultiAgentPPO
 
-# Define Actor Network
-class Actor(nn.Module):
-    def __init__(self, state_dim, action_dim):
-        super(Actor, self).__init__()
-        self.fc1 = nn.Linear(state_dim, 128)
-        self.fc2 = nn.Linear(128, 64)
-        self.fc3 = nn.Linear(64, action_dim)
-        self.softmax = nn.Softmax(dim=-1)
+def train_multi_agent_ppo(env, n_agents, state_dim, action_dim, episodes=500, steps_per_episode=200):
+    agent = MultiAgentPPO(n_agents, state_dim, action_dim)
+    episode_rewards = []
+    reward_1_history,reward_2_history,reward_3_history = [],[],[]
 
-    def forward(self, state):
-        x = torch.relu(self.fc1(state))
-        x = torch.relu(self.fc2(x))
-        action_probs = self.softmax(self.fc3(x))
-        return action_probs
-
-# Define Critic Network
-class Critic(nn.Module):
-    def __init__(self, state_dim):
-        super(Critic, self).__init__()
-        self.fc1 = nn.Linear(state_dim, 128)
-        self.fc2 = nn.Linear(128, 64)
-        self.fc3 = nn.Linear(64, 1)
-
-    def forward(self, state):
-        x = torch.relu(self.fc1(state))
-        x = torch.relu(self.fc2(x))
-        value = self.fc3(x)
-        return value
-
-# Multi-Agent A2C Class
-class MultiAgentA2C:
-    def __init__(self, n_agents, state_dim, action_dim, lr=1e-4, gamma=0.99):
-        self.n_agents = n_agents
-        self.actors = [Actor(state_dim, action_dim) for _ in range(n_agents)]
-        self.critic = Critic(state_dim)
-        self.actor_optimizers = [optim.Adam(actor.parameters(), lr=lr) for actor in self.actors]
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr)
-        self.gamma = gamma
-
-    def choose_actions(self, states):
-        actions = []
-        log_probs = []
-        for i, actor in enumerate(self.actors):
-            state = torch.FloatTensor(states[i])
-            action_probs = actor(state)
-            action = torch.multinomial(action_probs, 1).item()
-            log_prob = torch.log(action_probs[action])
-            actions.append(action)
-            log_probs.append(log_prob)
-        return actions, log_probs
-
-    def update(self, states, actions, rewards, next_states, dones):
-        states = torch.FloatTensor(states)
-        next_states = torch.FloatTensor(next_states)
-        rewards = torch.FloatTensor(rewards)
-        dones = torch.FloatTensor(dones)
-
-        # Calculate values and advantages
-        values = self.critic(states).squeeze()
-        next_values = self.critic(next_states).squeeze()
-        targets = rewards + self.gamma * next_values * (1 - dones)
-        advantages = targets - values
-
-        # Update Critic
-        critic_loss = advantages.pow(2).mean()
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        self.critic_optimizer.step()
-
-        # Update Actors
-        for i, actor in enumerate(self.actors):
-            action_probs = actor(states[i])
-            log_prob = torch.log(action_probs[actions[i]])
-            actor_loss = -(log_prob * advantages[i].detach())
-            self.actor_optimizers[i].zero_grad()
-            actor_loss.backward()
-            self.actor_optimizers[i].step()
-
-# Training Loop
-def train_multi_agent_a2c(env, n_agents, state_dim, action_dim, episodes=500, steps_per_episode=200):
-    agent = MultiAgentA2C(n_agents, state_dim, action_dim)
-    reward_history = []
     for episode in range(episodes):
+        trajectories = [[] for _ in range(n_agents)]
         states = env.reset()
-        total_rewards = [0] * n_agents
-
+        total_reward = 0
+        reward1,reward2,reward3 = 0,0,0
+        
         for _ in range(steps_per_episode):
-            actions, log_probs = agent.choose_actions(states)
-            print(actions)
+            actions, log_probs, values = [], [], []
+            for i in range(n_agents):
+                action, log_prob = agent.choose_action(i, states[i])
+                actions.append(action)
+                log_probs.append(log_prob)
+                # _, value = agent.agents[i](torch.FloatTensor(states[i]))
+                _, _, value = agent.agents[i](torch.FloatTensor(states[i]))
+                values.append(value.item())
+            
             next_states, rewards, dones, _ = env.step(actions)
-            agent.update(states, actions, rewards, next_states, dones)
+
+            reward1+=rewards[0]
+            reward2+=rewards[1]
+            reward3+=rewards[2]
+
+            for i in range(n_agents):
+                trajectories[i].append((states[i], actions[i], log_probs[i], rewards[i], dones[i], values[i]))
+                total_reward += rewards[i]
+
+            
             states = next_states
-            total_rewards = [r + reward for r, reward in zip(total_rewards, rewards)]
             if all(dones):
                 break
-        episode_total_reward = sum(total_rewards)
-        reward_history.append(episode_total_reward)
+        
+        episode_rewards.append(total_reward)
+        reward_1_history.append(reward1)
+        reward_2_history.append(reward2)
+        reward_3_history.append(reward3)
 
-        print(f"Episode {episode + 1}, Total Rewards: {total_rewards}")
+
+        agent.update(trajectories)
+
+        print(f"Episode {episode + 1}: Done")
+
     
-    plt.figure(figsize=(10, 6))
-    plt.plot(range(1, episodes + 1), reward_history, label='Total Reward')
-    plt.xlabel('Episode')
-    plt.ylabel('Total Reward')
-    plt.title('Training Progress')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig('training_progress.png')
-    plt.show()
+    max_reward,max_reward1,max_reward2,max_reward3 = max(episode_rewards),max(reward_1_history),max(reward_2_history),max(reward_3_history)
+    incremental_score_history = [max_reward-i for i in episode_rewards]
+    incremental_reward1_history = [max_reward1-i for i in reward_1_history]
+    incremental_reward2_history = [max_reward2-i for i in reward_2_history]
+    incremental_reward3_history = [max_reward3-i for i in reward_3_history]
 
-dfOrig = pd.read_excel('Data/FinalData.xlsx')
-df = dfOrig.copy()
-scaler = MinMaxScaler()
-df[['Orientation_Loss','Edge_Coverage','Average_Thickness','Average_Separation','Zoom','Focus','Contrast']] = scaler.fit_transform(df[['Orientation_Loss','Edge_Coverage','Average_Thickness','Average_Separation','Zoom','Focus','Contrast']])
+    return incremental_score_history,[incremental_reward1_history,incremental_reward2_history,incremental_reward3_history]
 
 
-v= {"ol": [0.5*min(df['Orientation_Loss']),1.5*max(df['Orientation_Loss'])],
-        "ec": [0.5*min(df['Edge_Coverage']),1.5*max(df['Edge_Coverage'])],
-        "at": [0.5*min(df['Average_Thickness']),1.5*max(df['Average_Thickness'])],
-        "as": [0.5*min(df['Average_Separation']),1.5*max(df['Average_Separation'])],
-        "de": [0.5*min(df['Distance_Entropy']),1.5*max(df['Distance_Entropy'])],
-        "z": [0.5*min(df['Zoom']),1.5*max(df['Zoom'])],
-        "f": [0.5*min(df['Focus']),1.5*max(df['Focus'])],
-        "c": [0.5*min(df['Contrast']),1.5*max(df['Contrast'])]
-        }
-corr_vals = [list(df.corr()['Zoom'])[:5],list(df.corr()['Focus'])[:5],list(df.corr()['Contrast'])[:5]]
+def test_multi_agent_ppo(env, agent, n_agents, steps_per_episode=200, episodes=100):
+    episode_rewards = []
+    reward_1_history, reward_2_history, reward_3_history = [], [], []
+    
+    for episode in range(episodes):
+        states = env.reset()
+        total_reward = 0
+        reward1, reward2, reward3 = 0, 0, 0
+        
+        for _ in range(steps_per_episode):
+            actions = []
+            for i in range(n_agents):
+                action, _ = agent.choose_action(i, states[i])
+                actions.append(action)
+
+            next_states, rewards, dones, _ = env.step(actions)
+
+            reward1 += rewards[0]
+            reward2 += rewards[1]
+            reward3 += rewards[2]
+            total_reward += sum(rewards)
+            states = next_states
+
+            if all(dones):
+                break
+
+        episode_rewards.append(total_reward)
+        reward_1_history.append(reward1)
+        reward_2_history.append(reward2)
+        reward_3_history.append(reward3)
+        print(f"Test Episode {episode + 1}: Total Reward {total_reward}")
+
+    max_reward,max_reward1,max_reward2,max_reward3 = max(episode_rewards),max(reward_1_history),max(reward_2_history),max(reward_3_history)
+    incremental_score_history = [max_reward-i for i in episode_rewards]
+    incremental_reward1_history = [max_reward1-i for i in reward_1_history]
+    incremental_reward2_history = [max_reward2-i for i in reward_2_history]
+    incremental_reward3_history = [max_reward3-i for i in reward_3_history]
+    
+    return incremental_score_history,[incremental_reward1_history,incremental_reward2_history,incremental_reward3_history]
+
 
 
 if __name__ == "__main__":
-    env = NewEnv(df, corr_vals)
-    n_agents = 3  # ( zoom, focus, contrast)
-    state_dim = 5  
-    action_dim = 4  
+    dfOrig = pd.read_excel('Data/FinalData.xlsx')
+    df = dfOrig.copy()
+    scaler = MinMaxScaler()
+    df[['Orientation_Loss','Edge_Coverage','Average_Thickness','Average_Separation','Zoom','Focus','Contrast']] = scaler.fit_transform(df[['Orientation_Loss','Edge_Coverage','Average_Thickness','Average_Separation','Zoom','Focus','Contrast']])
 
-    train_multi_agent_a2c(env, n_agents, state_dim, action_dim)
+    v= {"ol": [0.5*min(df['Orientation_Loss']),1.5*max(df['Orientation_Loss'])],
+            "ec": [0.5*min(df['Edge_Coverage']),1.5*max(df['Edge_Coverage'])],
+            "at": [0.5*min(df['Average_Thickness']),1.5*max(df['Average_Thickness'])],
+            "as": [0.5*min(df['Average_Separation']),1.5*max(df['Average_Separation'])],
+            "de": [0.5*min(df['Distance_Entropy']),1.5*max(df['Distance_Entropy'])],
+            "z": [0.5*min(df['Zoom']),1.5*max(df['Zoom'])],
+            "f": [0.5*min(df['Focus']),1.5*max(df['Focus'])],
+            "c": [0.5*min(df['Contrast']),1.5*max(df['Contrast'])]
+            }
+    corr_vals = [list(df.corr()['Zoom'])[:5],list(df.corr()['Focus'])[:5],list(df.corr()['Contrast'])[:5]]
+
+    train_df = df.sample(frac=0.8, random_state=42)
+    test_df = df.drop(train_df.index).reset_index(drop=True)
+
+    # Training Environment
+    print("Training Started...")
+    train_env = NewEnv(train_df, corr_vals)
+    n_agents = 3
+    state_dim = 5
+    action_dim = 4
+    agent = MultiAgentPPO(n_agents, state_dim, action_dim)
+
+    train_scores, train_rewards = train_multi_agent_ppo(train_env, n_agents, state_dim, action_dim, episodes=500)
+    print("Training Completed!")
+
+    # Testing Environment
+    print("Testing Started...")
+    test_env = NewEnv(test_df, corr_vals)
+    test_scores, test_rewards = test_multi_agent_ppo(test_env, agent, n_agents)
+    print("Testing Completed!")
+
+    # Plot Training Results
+    plt.figure()
+    plt.plot(train_scores, label='Training Scores')
+    plt.plot(range(len(train_scores), len(train_scores) + len(test_scores)), test_scores, label='Testing Scores')
+    plt.xlabel('Episode')
+    plt.ylabel('Total Reward')
+    plt.title('Training and Testing Performance')
+    plt.legend()
+    plt.savefig('Plots/train_test_rewards.png')
+    plt.show()
+
+    # Plot Rewards for Each Agent
+    plt.figure(figsize=(10, 6))
+    plt.plot(train_rewards[0], label='Agent 1 - Training', color='blue')
+    plt.plot(test_rewards[0], label='Agent 1 - Testing', color='blue', linestyle='dashed')
+
+    plt.plot(train_rewards[1], label='Agent 2 - Training', color='green')
+    plt.plot(test_rewards[1], label='Agent 2 - Testing', color='green', linestyle='dashed')
+
+    plt.plot(train_rewards[2], label='Agent 3 - Training', color='red')
+    plt.plot(test_rewards[2], label='Agent 3 - Testing', color='red', linestyle='dashed')
+

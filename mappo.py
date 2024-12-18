@@ -110,11 +110,14 @@ def train_multi_agent_ppo(env, n_agents, state_dim, action_dim, episodes=500, st
     agent = MultiAgentPPO(n_agents, state_dim, action_dim)
     episode_rewards = []
     reward_1_history,reward_2_history,reward_3_history = [],[],[]
+    done_1_history,done_2_history,done_3_history = [],[],[]
+
     for episode in range(episodes):
         trajectories = [[] for _ in range(n_agents)]
         states = env.reset()
         total_reward = 0
         reward1,reward2,reward3 = 0,0,0
+        done1,done2,done3 = 0,0,0
         
         for _ in range(steps_per_episode):
             actions, log_probs, values = [], [], []
@@ -131,6 +134,14 @@ def train_multi_agent_ppo(env, n_agents, state_dim, action_dim, episodes=500, st
             reward1+=rewards[0]
             reward2+=rewards[1]
             reward3+=rewards[2]
+
+            if dones[0]:
+                done1+=1
+            if dones[1]:
+                done2+=1
+            if dones[2]:
+                done3+=1
+
             for i in range(n_agents):
                 trajectories[i].append((states[i], actions[i], log_probs[i], rewards[i], dones[i], values[i]))
                 total_reward += rewards[i]
@@ -145,10 +156,19 @@ def train_multi_agent_ppo(env, n_agents, state_dim, action_dim, episodes=500, st
         reward_2_history.append(reward2)
         reward_3_history.append(reward3)
         # Update policy and value networks
+
+        done_1_history.append(done1)
+        done_2_history.append(done2)
+        done_3_history.append(done3)
+
         agent.update(trajectories)
 
         print(f"Episode {episode + 1}: Done")
 
+
+    print("Done 1 history: ",done_1_history)
+    print("Done 2 history: ",done_2_history)
+    print("Done 3 history: ",done_3_history)
     
     max_reward,max_reward1,max_reward2,max_reward3 = max(episode_rewards),max(reward_1_history),max(reward_2_history),max(reward_3_history)
     incremental_score_history = [max_reward-i for i in episode_rewards]
@@ -167,7 +187,7 @@ def train_multi_agent_ppo(env, n_agents, state_dim, action_dim, episodes=500, st
     plt.rcParams.update({'font.size': 12})
     plt.title('Rewards for Each Agent')
     plt.legend()
-    plt.savefig('rewards_plot.png') 
+    plt.savefig('Plots/rewards_plot.png') 
 
     plt.figure()
     plt.plot(incremental_score_history)
@@ -175,16 +195,9 @@ def train_multi_agent_ppo(env, n_agents, state_dim, action_dim, episodes=500, st
     plt.ylabel('Total Score')
     plt.rcParams.update({'font.size': 12})
     plt.title('Total Score per Episode')
-    plt.savefig('total_score_plot.png')
+    plt.savefig('Plots/total_score_plot.png')
 
-    # plt.figure(figsize=(10, 6))
-    # plt.plot(episode_rewards, label="Total Rewards")
-    # plt.xlabel("Episodes")
-    # plt.ylabel("Rewards")
-    # plt.title("Training Rewards Over Episodes")
-    # plt.legend()
-    # plt.grid()
-    # plt.savefig("training_rewards.png")
+    
 
 dfOrig = pd.read_excel('Data/FinalData.xlsx')
 df = dfOrig.copy()
